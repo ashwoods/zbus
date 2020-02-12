@@ -42,16 +42,35 @@ mod tests {
     use crate::to_bytes;
     use crate::{Array, EncodingFormat, ObjectPath, Signature, Variant};
 
+    use glib::Bytes;
+    use glib::Variant as GVariant;
+
+    fn decode_with_gvariant<B, T>(encoded: B) -> T
+    where
+        B: AsRef<[u8]> + Send + 'static,
+        T: glib::variant::FromVariant,
+    {
+        let bytes = Bytes::from_owned(encoded);
+        let gv = GVariant::new_from_bytes::<T>(&bytes);
+        gv.get::<T>().unwrap()
+    }
+
     #[test]
     fn u8_variant() {
         let encoded = to_bytes(&77u8, EncodingFormat::DBus).unwrap();
         assert!(encoded.len() == 1);
+
+        // Check with GVariant
+        assert!(dbg!(decode_with_gvariant::<_, u8>(encoded)) == 77u8);
 
         // As Variant
         let v = Variant::from(77u8);
         assert!(v.value_signature().as_str() == "y");
         let encoded = to_bytes(&v, EncodingFormat::DBus).unwrap();
         assert!(encoded.len() == 4);
+
+        // Check with GVariant
+        //let v = decode_with_gvariant::<_,GVariant>(encoded);
     }
 
     #[test]
@@ -59,6 +78,13 @@ mod tests {
         let string = "hello world";
         let encoded = to_bytes(&string, EncodingFormat::DBus).unwrap();
         assert!(encoded.len() == 16);
+
+        // Check with GVariant
+        let bytes = Bytes::from_owned(encoded);
+        let gv = GVariant::new_from_bytes::<&str>(&bytes);
+        // TODO: Fails currently because GVariant's encoding is different than DBus. We can only do
+        // this once we've gvariant suppot.
+        assert!(dbg!(gv.get_str().unwrap()) == "hello world");
 
         // As Variant
         let v = Variant::from(string);
