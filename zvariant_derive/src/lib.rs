@@ -90,6 +90,7 @@ fn impl_enum(
     }
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     let expended = quote! {
         impl #impl_generics zvariant::VariantValue for #name #ty_generics #where_clause {
             #[inline]

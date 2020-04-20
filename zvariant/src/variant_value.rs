@@ -125,4 +125,17 @@ macro_rules! map_impl {
 map_impl!(BTreeMap<K: Ord, V>);
 map_impl!(HashMap<K: Eq + Hash, V, H: BuildHasher>);
 
+// Flagset
+#[cfg(feature = "flagset")]
+impl<F> VariantValue for flagset::FlagSet<F>
+where
+    F: flagset::Flags,
+    F::Type: VariantValue,
+{
+    #[inline]
+    fn signature() -> Signature<'static> {
+        F::Type::signature()
+    }
+}
+
 // TODO: Blanket implementation for more types: https://github.com/serde-rs/serde/blob/master/serde/src/ser/impls.rs
