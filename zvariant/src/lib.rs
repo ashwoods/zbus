@@ -105,6 +105,8 @@
 //! [`Vec`]: https://doc.rust-lang.org/std/vec/struct.Vec.html
 //! [`arrayvec::ArrayVec`]: https://docs.rs/arrayvec/0.5.1/arrayvec/struct.ArrayVec.html
 //! [`Value` module documentation]: enum.Value.html
+#![feature(test)]
+extern crate test;
 
 #[macro_use]
 mod utils;
@@ -613,14 +615,6 @@ mod tests {
     }
 
     #[test]
-    fn struct_ref() {
-        let ctxt = Context::<LE>::new_dbus(0);
-        let encoded = to_bytes(ctxt, &(&1u32, &2u32)).unwrap();
-        let decoded: [u32; 2] = from_slice(&encoded, ctxt).unwrap();
-        assert_eq!(decoded, [1u32, 2u32]);
-    }
-
-    #[test]
     fn dict_value() {
         let mut map: HashMap<i64, &str> = HashMap::new();
         map.insert(1, "123");
@@ -843,22 +837,44 @@ mod tests {
         assert_eq!(decoded, NoReprEnum::Variant2);
     }
 
-    #[test]
-    fn serialized_size() {
-        let ctxt = Context::<LE>::new_dbus(0);
-        let l = crate::serialized_size(ctxt, &()).unwrap();
-        assert_eq!(l, 0);
+    #[bench]
+    fn serialized_size(b: &mut test::Bencher) {
+        let ctxt = Context::<BE>::new_dbus(0);
+        let vec: Vec<u64> = (0..10_000_000).collect();
+        b.iter(|| {
+            let l = crate::serialized_size(ctxt, &()).unwrap();
+            assert_eq!(l, 0);
 
-        let stdout = std::io::stdout();
-        let l = crate::serialized_size_fds(ctxt, &Fd::from(&stdout)).unwrap();
-        assert_eq!(l, (4, 1));
+            let stdout = std::io::stdout();
+            let l = crate::serialized_size_fds(ctxt, &Fd::from(&stdout)).unwrap();
+            assert_eq!(l, (4, 1));
 
-        let l = crate::serialized_size(ctxt, &('a', "abc", &(1_u32, 2))).unwrap();
-        assert_eq!(l, 24);
+            let l = crate::serialized_size(ctxt, &('a', "abc", &(1_u32, 2))).unwrap();
+            assert_eq!(l, 24);
 
-        let v = vec![1, 2];
-        let l = crate::serialized_size(ctxt, &('a', "abc", &v)).unwrap();
-        assert_eq!(l, 28);
+            let l = crate::serialized_size(ctxt, &('a', "abc", &vec)).unwrap();
+            assert_eq!(l, 80000024);
+        });
+    }
+
+    #[bench]
+    fn serialized_blah(b: &mut test::Bencher) {
+        let ctxt = Context::<BE>::new_dbus(0);
+        let vec: Vec<u64> = (0..10_000_000).collect();
+        b.iter(|| {
+            let b = crate::to_bytes(ctxt, &()).unwrap();
+            assert_eq!(b.len(), 0);
+
+            let stdout = std::io::stdout();
+            let (b, fds) = crate::to_bytes_fds(ctxt, &Fd::from(&stdout)).unwrap();
+            assert_eq!(b.len(), 4);
+
+            let b = crate::to_bytes(ctxt, &('a', "abc", &(1_u32, 2))).unwrap();
+            assert_eq!(b.len(), 24);
+
+            let b = crate::to_bytes(ctxt, &('a', "abc", &vec)).unwrap();
+            assert_eq!(b.len(), 80000024);
+        });
     }
 
     #[test]
