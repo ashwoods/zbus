@@ -251,7 +251,7 @@ impl Connection {
     ///
     /// Read from the connection until a message is received or an error is reached. Return the
     /// message on success.
-    pub fn receive_message(&self) -> Result<Message, ConnectionError> {
+    pub fn receive_message(&mut self) -> Result<Message, ConnectionError> {
         let mut buf = [0; MIN_MESSAGE_SIZE];
         let mut fds = read_exact(&self.socket, &mut buf[..])?;
 
@@ -285,7 +285,7 @@ impl Connection {
     }
 
     pub fn call_method<B>(
-        &self,
+        &mut self,
         destination: Option<&str>,
         path: &str,
         iface: Option<&str>,
