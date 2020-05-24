@@ -12,6 +12,10 @@ use crate::message_field;
 use crate::utils::{read_exact, write_all};
 use crate::{Message, MessageError, MessageType, MIN_MESSAGE_SIZE};
 
+// While a typical D-Bus message is much smaller, it can be up to 64MiB so in worst case scenario,
+// we'll end up with 1 GiB worth of messages queued.
+const MAX_MESSSAGES_IN_QUEUE: usize = 16;
+
 #[derive(Debug)]
 pub struct Connection {
     server_guid: String,
@@ -21,6 +25,9 @@ pub struct Connection {
     socket: UnixStream,
     // Serial number for next outgoing message
     serial: AtomicU32,
+
+    // Queue of incoming messages
+    incoming_queue: Vec<Message>,
 }
 
 #[derive(Debug)]
@@ -213,6 +220,7 @@ impl Connection {
             cap_unix_fd,
             serial: AtomicU32::new(1),
             unique_name: None,
+            incoming_queue: vec![],
         };
 
         // Now that daemon has approved us, we must send a hello as per specs
@@ -251,21 +259,66 @@ impl Connection {
     ///
     /// Read from the connection until a message is received or an error is reached. Return the
     /// message on success.
-    pub fn receive_message(&mut self) -> Result<Message, ConnectionError> {
-        let mut buf = [0; MIN_MESSAGE_SIZE];
-        let mut fds = read_exact(&self.socket, &mut buf[..])?;
+    pub fn receive_message<F>(&mut self, criteria_func: F) -> Result<Message, ConnectionError>
+    where
+        F: Fn(&Message) -> Result<bool, ConnectionError>,
+    {
+        // First check if we already received this message
+        let mut idx = usize::max_value();
+        for (pos, incoming) in self.incoming_queue.iter().enumerate() {
+            match criteria_func(&incoming) {
+                Ok(result) => {
+                    if result {
+                        idx = pos;
 
-        let mut incoming = Message::from_bytes(&buf)?;
-        let bytes_left = incoming.bytes_to_completion()?;
-        if bytes_left == 0 {
-            return Err(ConnectionError::Handshake);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("Error processing incoming message: {}", e);
+
+                    continue;
+                }
+            }
         }
-        let mut buf = vec![0; bytes_left as usize];
-        fds.append(&mut read_exact(&self.socket, &mut buf[..])?);
-        incoming.add_bytes(&buf[..])?;
-        incoming.set_owned_fds(fds);
+        if idx != usize::max_value() {
+            return Ok(self.incoming_queue.remove(idx));
+        }
+        let mut buf = [0; MIN_MESSAGE_SIZE];
 
-        Ok(incoming)
+        loop {
+            let mut fds = read_exact(&self.socket, &mut buf[..])?;
+
+            let mut incoming = Message::from_bytes(&buf)?;
+            let bytes_left = incoming.bytes_to_completion()?;
+            if bytes_left == 0 {
+                return Err(ConnectionError::Handshake);
+            }
+            let mut buf = vec![0; bytes_left as usize];
+            fds.append(&mut read_exact(&self.socket, &mut buf[..])?);
+            incoming.add_bytes(&buf[..])?;
+            incoming.set_owned_fds(fds);
+
+            match criteria_func(&incoming) {
+                Ok(result) => {
+                    if result {
+                        return Ok(incoming);
+                    } else {
+                        if self.incoming_queue.len() == MAX_MESSSAGES_IN_QUEUE {
+                            return Err(ConnectionError::TooManyMessages);
+                        }
+                        self.incoming_queue.push(incoming);
+
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    println!("Error processing incoming message: {}", e);
+
+                    continue;
+                }
+            }
+        }
     }
 
     fn send_message(&self, mut msg: Message) -> Result<u32, ConnectionError> {
@@ -306,15 +359,15 @@ impl Connection {
 
         let serial = self.send_message(m)?;
 
-        // FIXME: We need to read incoming messages in a separate thread and maintain a queue
         loop {
-            let m = self.receive_message()?;
+            let m = self.receive_message(|m| {
+                m.header()?
+                    .reply_serial()
+                    .map(|s| s == Some(serial))
+                    .map_err(ConnectionError::Message)
+            })?;
+
             let h = m.header()?;
-
-            if h.reply_serial()? != Some(serial) {
-                continue;
-            }
-
             match h.message_type()? {
                 MessageType::Error => return Err(m.into()),
                 MessageType::MethodReturn => return Ok(m),
