@@ -32,6 +32,7 @@ pub enum ConnectionError {
     Variant(VariantError),
     Handshake,
     InvalidReply,
+    TooManyMessages,
     // According to the spec, there can be all kinds of details in D-Bus errors but nobody adds anything more than a
     // string description.
     MethodError(String, Option<String>, Message),
@@ -48,6 +49,7 @@ impl error::Error for ConnectionError {
             ConnectionError::MessageField(e) => Some(e),
             ConnectionError::Variant(e) => Some(e),
             ConnectionError::InvalidReply => None,
+            ConnectionError::TooManyMessages => None,
             ConnectionError::MethodError(_, _, _) => None,
             ConnectionError::Unsupported => None,
         }
@@ -64,6 +66,7 @@ impl fmt::Display for ConnectionError {
             ConnectionError::MessageField(e) => write!(f, "Message field parsing error: {}", e),
             ConnectionError::Variant(e) => write!(f, "{}", e),
             ConnectionError::InvalidReply => write!(f, "Invalid D-Bus method reply"),
+            ConnectionError::TooManyMessages => write!(f, "Too many messages received"),
             ConnectionError::MethodError(name, detail, _reply) => write!(
                 f,
                 "{}: {}",
