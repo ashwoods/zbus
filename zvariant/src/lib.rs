@@ -165,6 +165,9 @@ pub use owned_value::*;
 
 mod signature_parser;
 
+mod size;
+pub use size::*;
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

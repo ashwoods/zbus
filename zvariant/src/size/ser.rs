@@ -1,229 +1,72 @@
-use byteorder::WriteBytesExt;
 use serde::{ser, ser::SerializeSeq, Serialize};
-use std::io::{Seek, Write};
 use std::os::unix::io::RawFd;
 use std::{marker::PhantomData, str};
 
+use crate::error::{Error, Result};
+use crate::r#type::Type;
 use crate::signature_parser::SignatureParser;
 use crate::utils::*;
-use crate::Type;
-use crate::{Basic, EncodingContext};
-use crate::{Error, Result};
-use crate::{ObjectPath, Signature};
+use crate::{basic::Basic, encoding_context::EncodingContext};
+use crate::{object_path::ObjectPath, signature::Signature};
 
-/// Serialize `T` to the given `writer`.
-///
-/// This function returns the number of bytes written to the given `writer`.
+/// Calculate the serialized size of `T`.
 ///
 /// # Panics
 ///
 /// This function will panic if the value to serialize contains file descriptors. Use
-/// [`to_writer_fds`] if you'd want to potentially pass FDs.
+/// [`serialized_size_fds`] if `T` (potentially) contains FDs.
 ///
 /// # Examples
 ///
 /// ```
-/// use zvariant::{EncodingContext, from_slice, to_writer};
+/// use zvariant::{EncodingContext, serialized_size};
 ///
 /// let ctxt = EncodingContext::<byteorder::LE>::new_dbus(0);
-/// let mut cursor = std::io::Cursor::new(vec![]);
-/// to_writer(&mut cursor, ctxt, &42u32).unwrap();
-/// let value: u32 = from_slice(cursor.get_ref(), ctxt).unwrap();
-/// assert_eq!(value, 42);
+/// let len = serialized_size(ctxt, "hello world").unwrap();
+/// assert_eq!(len, 16);
+///
+/// let len = serialized_size(ctxt, &("hello world!", 42_u64)).unwrap();
+/// assert_eq!(len, 32);
 /// ```
 ///
-/// [`to_writer_fds`]: fn.to_writer_fds.html
-pub fn to_writer<B, W, T: ?Sized>(
-    writer: &mut W,
-    ctxt: EncodingContext<B>,
-    value: &T,
-) -> Result<usize>
-where
-    B: byteorder::ByteOrder,
-    W: Write + Seek,
-    T: Serialize + Type,
-{
-    let signature = T::signature();
-
-    to_writer_for_signature(writer, ctxt, &signature, value)
-}
-
-/// Serialize `T` that (potentially) contains FDs, to the given `writer`.
-///
-/// This function returns the number of bytes written to the given `writer` and the file descriptor
-/// vector, which needs to be transferred via an out-of-band platform specific mechanism.
-pub fn to_writer_fds<B, W, T: ?Sized>(
-    writer: &mut W,
-    ctxt: EncodingContext<B>,
-    value: &T,
-) -> Result<(usize, Vec<RawFd>)>
-where
-    B: byteorder::ByteOrder,
-    W: Write + Seek,
-    T: Serialize + Type,
-{
-    let signature = T::signature();
-
-    to_writer_fds_for_signature(writer, ctxt, &signature, value)
-}
-
-/// Serialize `T` as a byte vector.
-///
-/// See [`from_slice`] documentation for an example of how to use this function.
-///
-/// # Panics
-///
-/// This function will panic if the value to serialize contains file descriptors. Use
-/// [`to_bytes_fds`] if you'd want to potentially pass FDs.
-///
-/// [`to_bytes_fds`]: fn.to_bytes_fds.html
-/// [`from_slice`]: fn.from_slice.html#examples
-pub fn to_bytes<B, T: ?Sized>(ctxt: EncodingContext<B>, value: &T) -> Result<Vec<u8>>
+/// [`serialized_size_fds`]: fn.serialized_size_fds.html
+pub fn serialized_size<B, T: ?Sized>(ctxt: EncodingContext<B>, value: &T) -> Result<usize>
 where
     B: byteorder::ByteOrder,
     T: Serialize + Type,
 {
-    let (bytes, fds) = to_bytes_fds(ctxt, value)?;
-    if !fds.is_empty() {
-        panic!("can't serialize with FDs")
-    }
-
-    Ok(bytes)
-}
-
-/// Serialize `T` that (potentially) contains FDs, as a byte vector.
-///
-/// The returned file descriptor needs to be transferred via an out-of-band platform specific
-/// mechanism.
-pub fn to_bytes_fds<B, T: ?Sized>(
-    ctxt: EncodingContext<B>,
-    value: &T,
-) -> Result<(Vec<u8>, Vec<RawFd>)>
-where
-    B: byteorder::ByteOrder,
-    T: Serialize + Type,
-{
-    let mut cursor = std::io::Cursor::new(vec![]);
-    let (_, fds) = to_writer_fds(&mut cursor, ctxt, value)?;
-    Ok((cursor.into_inner(), fds))
-}
-
-/// Serialize `T` that has the given signature, to the given `writer`.
-///
-/// Use this function instead of [`to_writer`] if the value being serialized does not implement
-/// [`Type`].
-///
-/// This function returns the number of bytes written to the given `writer`.
-///
-/// [`to_writer`]: fn.to_writer.html
-/// [`Type`]: trait.Type.html
-pub fn to_writer_for_signature<B, W, T: ?Sized>(
-    writer: &mut W,
-    ctxt: EncodingContext<B>,
-    signature: &Signature,
-    value: &T,
-) -> Result<usize>
-where
-    B: byteorder::ByteOrder,
-    W: Write + Seek,
-    T: Serialize,
-{
-    let (len, fds) = to_writer_fds_for_signature(writer, ctxt, signature, value)?;
-    if !fds.is_empty() {
+    let (len, num_fds) = serialized_size_fds(ctxt, value)?;
+    if num_fds != 0 {
         panic!("can't serialize with FDs")
     }
 
     Ok(len)
 }
 
-/// Serialize `T` that (potentially) contains FDs and has the given signature, to the given `writer`.
+/// Calculate the serialized size of `T` that (potentially) contains FDs.
 ///
-/// Use this function instead of [`to_writer_fds`] if the value being serialized does not implement
-/// [`Type`].
-///
-/// This function returns the number of bytes written to the given `writer` and the file descriptor
-/// vector, which needs to be transferred via an out-of-band platform specific mechanism.
-///
-/// [`to_writer_fds`]: fn.to_writer_fds.html
-/// [`Type`]: trait.Type.html
-pub fn to_writer_fds_for_signature<B, W, T: ?Sized>(
-    writer: &mut W,
+/// Returns the serialized size of `T` and the number of FDs.
+pub fn serialized_size_fds<B, T: ?Sized>(
     ctxt: EncodingContext<B>,
-    signature: &Signature,
     value: &T,
-) -> Result<(usize, Vec<RawFd>)>
+) -> Result<(usize, usize)>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
-    T: Serialize,
+    T: Serialize + Type,
 {
+    let signature = T::signature();
+
     let mut fds = vec![];
-    let mut serializer = Serializer::<B, W>::new(signature, writer, &mut fds, ctxt);
+    let mut serializer = Serializer::<B>::new(&signature, &mut fds, ctxt);
     value.serialize(&mut serializer)?;
-    Ok((serializer.bytes_written, fds))
+
+    Ok((serializer.size, fds.len()))
 }
 
-/// Serialize `T` that has the given signature, to a new byte vector.
-///
-/// Use this function instead of [`to_bytes`] if the value being serialized does not implement
-/// [`Type`]. See [`from_slice_for_signature`] documentation for an example of how to use this
-/// function.
-///
-/// # Panics
-///
-/// This function will panic if the value to serialize contains file descriptors. Use
-/// [`to_bytes_fds_for_signature`] if you'd want to potentially pass FDs.
-///
-/// [`to_bytes`]: fn.to_bytes.html
-/// [`Type`]: trait.Type.html
-/// [`from_slice_for_signature`]: fn.from_slice_for_signature.html#examples
-pub fn to_bytes_for_signature<B, T: ?Sized>(
-    ctxt: EncodingContext<B>,
-    signature: &Signature,
-    value: &T,
-) -> Result<Vec<u8>>
-where
-    B: byteorder::ByteOrder,
-    T: Serialize,
-{
-    let (bytes, fds) = to_bytes_fds_for_signature(ctxt, signature, value)?;
-    if !fds.is_empty() {
-        panic!("can't serialize with FDs")
-    }
-
-    Ok(bytes)
-}
-
-/// Serialize `T` that (potentially) contains FDs and has the given signature, to a new byte vector.
-///
-/// Use this function instead of [`to_bytes_fds`] if the value being serialized does not implement
-/// [`Type`].
-///
-/// Please note that the serialized bytes only contain the indices of the file descriptors from the
-/// returned file descriptor vector, which needs to be transferred via an out-of-band platform
-/// specific mechanism.
-///
-/// [`to_bytes_fds`]: fn.to_bytes_fds.html
-/// [`Type`]: trait.Type.html
-pub fn to_bytes_fds_for_signature<B, T: ?Sized>(
-    ctxt: EncodingContext<B>,
-    signature: &Signature,
-    value: &T,
-) -> Result<(Vec<u8>, Vec<RawFd>)>
-where
-    B: byteorder::ByteOrder,
-    T: Serialize,
-{
-    let mut cursor = std::io::Cursor::new(vec![]);
-    let (_, fds) = to_writer_fds_for_signature(&mut cursor, ctxt, signature, value)?;
-    Ok((cursor.into_inner(), fds))
-}
-
-/// Our serialization implementation.
-pub struct Serializer<'ser, 'sig, B, W> {
+/// Our size serializer implementation.
+struct Serializer<'ser, 'sig, B> {
     pub(self) ctxt: EncodingContext<B>,
-    pub(self) writer: &'ser mut W,
-    pub(self) bytes_written: usize,
+    pub(self) size: usize,
     pub(self) fds: &'ser mut Vec<RawFd>,
 
     pub(self) sign_parser: SignatureParser<'sig>,
@@ -233,15 +76,13 @@ pub struct Serializer<'ser, 'sig, B, W> {
     b: PhantomData<B>,
 }
 
-impl<'ser, 'sig, B, W> Serializer<'ser, 'sig, B, W>
+impl<'ser, 'sig, B> Serializer<'ser, 'sig, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     /// Create a Serializer struct instance.
-    pub fn new<'w: 'ser, 'f: 'ser>(
+    pub(self) fn new<'f: 'ser>(
         signature: &Signature<'sig>,
-        writer: &'w mut W,
         fds: &'f mut Vec<RawFd>,
         ctxt: EncodingContext<B>,
     ) -> Self {
@@ -250,154 +91,114 @@ where
         Self {
             ctxt,
             sign_parser,
-            writer,
             fds,
-            bytes_written: 0,
+            size: 0,
             value_sign: None,
             b: PhantomData,
         }
     }
 
-    /// Unwrap the `Writer` reference from the `Serializer`.
-    #[inline]
-    pub fn into_inner(self) -> &'ser mut W {
-        self.writer
-    }
-
-    fn add_fd(&mut self, fd: RawFd) -> Result<u32> {
+    fn add_fd(&mut self, fd: RawFd) -> u32 {
         if let Some(idx) = self.fds.iter().position(|&x| x == fd) {
-            return Ok(idx as u32);
+            return idx as u32;
         }
         let idx = self.fds.len();
         self.fds.push(fd);
-        Ok(idx as u32)
+
+        idx as u32
     }
 
-    fn add_padding(&mut self, alignment: usize) -> Result<usize> {
+    fn add_padding(&mut self, alignment: usize) -> usize {
         let padding = padding_for_n_bytes(self.abs_pos(), alignment);
-        if padding > 0 {
-            let byte = [0_u8; 1];
-            for _ in 0..padding {
-                self.write_all(&byte).map_err(Error::Io)?;
-            }
-        }
+        self.size += padding;
 
-        Ok(padding)
+        padding
     }
 
-    fn prep_serialize_basic<T>(&mut self) -> Result<()>
+    fn serialize_basic<T>(&mut self) -> Result<()>
     where
         T: Basic,
     {
         self.sign_parser.parse_char(Some(T::SIGNATURE_CHAR))?;
-        self.add_padding(T::ALIGNMENT)?;
+        self.add_padding(T::ALIGNMENT);
+        self.size += T::ALIGNMENT;
 
         Ok(())
     }
 
     fn prep_serialize_enum_variant(&mut self, variant_index: u32) -> Result<()> {
         // Encode enum variants as a struct with first field as variant index
-        self.add_padding(u32::ALIGNMENT)?;
-        self.write_u32::<B>(variant_index).map_err(Error::Io)?;
+        self.serialize_basic::<u32>()?;
 
         Ok(())
     }
 
     fn abs_pos(&self) -> usize {
-        self.ctxt.position() + self.bytes_written
+        self.ctxt.position() + self.size
     }
 }
 
-impl<'ser, 'sig, B, W> Write for Serializer<'ser, 'sig, B, W>
+impl<'ser, 'sig, 'b, B> ser::Serializer for &'b mut Serializer<'ser, 'sig, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
-{
-    /// Write `buf` and increment internal bytes written counter.
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.writer.write(buf).map(|n| {
-            self.bytes_written += n;
-
-            n
-        })
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-impl<'ser, 'sig, 'b, B, W> ser::Serializer for &'b mut Serializer<'ser, 'sig, B, W>
-where
-    B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = SeqSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeTuple = StructSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeTupleStruct = StructSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeTupleVariant = StructSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeMap = SeqSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeStruct = StructSerializer<'ser, 'sig, 'b, B, W>;
-    type SerializeStructVariant = StructSerializer<'ser, 'sig, 'b, B, W>;
+    type SerializeSeq = SeqSerializer<'ser, 'sig, 'b, B>;
+    type SerializeTuple = StructSerializer<'ser, 'sig, 'b, B>;
+    type SerializeTupleStruct = StructSerializer<'ser, 'sig, 'b, B>;
+    type SerializeTupleVariant = StructSerializer<'ser, 'sig, 'b, B>;
+    type SerializeMap = SeqSerializer<'ser, 'sig, 'b, B>;
+    type SerializeStruct = StructSerializer<'ser, 'sig, 'b, B>;
+    type SerializeStructVariant = StructSerializer<'ser, 'sig, 'b, B>;
 
     fn serialize_bool(self, v: bool) -> Result<()> {
-        self.prep_serialize_basic::<bool>()?;
-        self.write_u32::<B>(v as u32).map_err(Error::Io)
+        self.serialize_basic::<bool>()
     }
 
     fn serialize_i8(self, v: i8) -> Result<()> {
         // No i8 type in D-Bus/GVariant, let's pretend it's i16
-        self.write_i16::<B>(v as i16).map_err(Error::Io)
+        self.serialize_basic::<i16>()
     }
 
     // TODO: Use macro to avoid code-duplication here
     fn serialize_i16(self, v: i16) -> Result<()> {
-        self.prep_serialize_basic::<i16>()?;
-        self.write_i16::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<i16>()
     }
 
     fn serialize_i32(self, v: i32) -> Result<()> {
         match self.sign_parser.next_char()? {
             'h' => {
                 self.sign_parser.parse_char(None)?;
-                self.add_padding(u32::ALIGNMENT)?;
-                let v = self.add_fd(v)?;
-                self.write_u32::<B>(v).map_err(Error::Io)
+                self.add_padding(u32::ALIGNMENT);
+                let v = self.add_fd(v);
+                self.size += u32::ALIGNMENT;
+
+                Ok(())
             }
-            _ => {
-                self.prep_serialize_basic::<i32>()?;
-                self.write_i32::<B>(v).map_err(Error::Io)
-            }
+            _ => self.serialize_basic::<i32>(),
         }
     }
 
     fn serialize_i64(self, v: i64) -> Result<()> {
-        self.prep_serialize_basic::<i64>()?;
-        self.write_i64::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<i64>()
     }
 
     fn serialize_u8(self, v: u8) -> Result<()> {
-        self.prep_serialize_basic::<u8>()?;
-        // Endianness is irrelevant for single bytes.
-        self.write_u8(v).map_err(Error::Io)
+        self.serialize_basic::<u8>()
     }
 
     fn serialize_u16(self, v: u16) -> Result<()> {
-        self.prep_serialize_basic::<u16>()?;
-        self.write_u16::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<u16>()
     }
 
     fn serialize_u32(self, v: u32) -> Result<()> {
-        self.prep_serialize_basic::<u32>()?;
-        self.write_u32::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<u32>()
     }
 
     fn serialize_u64(self, v: u64) -> Result<()> {
-        self.prep_serialize_basic::<u64>()?;
-        self.write_u64::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<u64>()
     }
 
     fn serialize_f32(self, v: f32) -> Result<()> {
@@ -406,8 +207,7 @@ where
     }
 
     fn serialize_f64(self, v: f64) -> Result<()> {
-        self.prep_serialize_basic::<f64>()?;
-        self.write_f64::<B>(v).map_err(Error::Io)
+        self.serialize_basic::<f64>()
     }
 
     fn serialize_char(self, v: char) -> Result<()> {
@@ -420,12 +220,11 @@ where
 
         match c {
             ObjectPath::SIGNATURE_CHAR | <&str>::SIGNATURE_CHAR => {
-                self.add_padding(<&str>::ALIGNMENT)?;
-                self.write_u32::<B>(usize_to_u32(v.len()))
-                    .map_err(Error::Io)?;
+                self.add_padding(<&str>::ALIGNMENT);
+                self.size += u32::ALIGNMENT;
             }
             Signature::SIGNATURE_CHAR | VARIANT_SIGNATURE_CHAR => {
-                self.write_u8(usize_to_u8(v.len())).map_err(Error::Io)?;
+                self.size += 1;
 
                 if c == VARIANT_SIGNATURE_CHAR {
                     self.value_sign = Some(signature_string!(v));
@@ -446,8 +245,8 @@ where
             }
         }
         self.sign_parser.parse_char(None)?;
-        self.write_all(&v.as_bytes()).map_err(Error::Io)?;
-        self.write_all(&b"\0"[..]).map_err(Error::Io)?;
+        // String and null byte
+        self.size += v.len() + 1;
 
         Ok(())
     }
@@ -517,17 +316,14 @@ where
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
         self.sign_parser.parse_char(Some(ARRAY_SIGNATURE_CHAR))?;
-        self.add_padding(ARRAY_ALIGNMENT)?;
-        // Length in bytes (unfortunately not the same as len passed to us here) which we initially
-        // set to 0.
-        self.write_u32::<B>(0_u32).map_err(Error::Io)?;
+        self.add_padding(ARRAY_ALIGNMENT);
+        self.size += u32::ALIGNMENT;
 
         let next_signature_char = self.sign_parser.next_char()?;
         let alignment = alignment_for_signature_char(next_signature_char, self.ctxt.format());
-        let start = self.bytes_written;
         // D-Bus expects us to add padding for the first element even when there is no first
         // element (i-e empty array) so we add padding already.
-        let first_padding = self.add_padding(alignment)?;
+        let start = self.size + self.add_padding(alignment);
         let element_signature_pos = self.sign_parser.pos();
         let rest_of_signature =
             Signature::from_str_unchecked(&self.sign_parser.signature()[element_signature_pos..]);
@@ -538,7 +334,6 @@ where
             serializer: self,
             start,
             element_signature_len,
-            first_padding,
         })
     }
 
@@ -577,7 +372,7 @@ where
             end_parens = None;
         } else {
             self.sign_parser.parse_char(Some(c))?;
-            self.add_padding(STRUCT_ALIGNMENT)?;
+            self.add_padding(STRUCT_ALIGNMENT);
 
             if c == STRUCT_SIG_START_CHAR {
                 end_parens = Some(STRUCT_SIG_END_CHAR);
@@ -617,53 +412,32 @@ where
     }
 }
 
-#[doc(hidden)]
-pub struct SeqSerializer<'ser, 'sig, 'b, B, W> {
-    serializer: &'b mut Serializer<'ser, 'sig, B, W>,
+struct SeqSerializer<'ser, 'sig, 'b, B> {
+    serializer: &'b mut Serializer<'ser, 'sig, B>,
     start: usize,
     // where value signature starts
     element_signature_len: usize,
-    // First element's padding
-    first_padding: usize,
 }
 
-impl<'ser, 'sig, 'b, B, W> SeqSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> SeqSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     pub(self) fn end_seq(self) -> Result<()> {
-        if self.start + self.first_padding == self.serializer.bytes_written {
+        if self.start == self.serializer.size {
             // Empty sequence so we need to parse the element signature.
             self.serializer
                 .sign_parser
                 .skip_chars(self.element_signature_len)?;
         }
 
-        // Set size of array in bytes
-        let array_len = self.serializer.bytes_written - self.start;
-        let len = usize_to_u32(array_len - self.first_padding);
-        self.serializer
-            .writer
-            .seek(std::io::SeekFrom::Current(-(array_len as i64) - 4))
-            .map_err(Error::Io)?;
-        self.serializer
-            .writer
-            .write_u32::<B>(len)
-            .map_err(Error::Io)?;
-        self.serializer
-            .writer
-            .seek(std::io::SeekFrom::Current(array_len as i64))
-            .map_err(Error::Io)?;
-
         Ok(())
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeSeq for SeqSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeSeq for SeqSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -672,7 +446,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        if self.start + self.first_padding != self.serializer.bytes_written {
+        if self.start != self.serializer.size {
             // The signature needs to be rewinded before encoding each element.
             self.serializer
                 .sign_parser
@@ -686,16 +460,14 @@ where
     }
 }
 
-#[doc(hidden)]
-pub struct StructSerializer<'ser, 'sig, 'b, B, W> {
-    serializer: &'b mut Serializer<'ser, 'sig, B, W>,
+struct StructSerializer<'ser, 'sig, 'b, B> {
+    serializer: &'b mut Serializer<'ser, 'sig, B>,
     end_parens: Option<char>,
 }
 
-impl<'ser, 'sig, 'b, B, W> StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     fn serialize_struct_element<T>(&mut self, name: Option<&'static str>, value: &T) -> Result<()>
     where
@@ -712,17 +484,16 @@ where
                     .expect("Incorrect Value encoding");
 
                 let sign_parser = SignatureParser::new(signature);
-                let mut serializer = Serializer::<B, W> {
+                let mut serializer = Serializer::<B> {
                     ctxt: self.serializer.ctxt,
                     sign_parser,
-                    writer: &mut self.serializer.writer,
                     fds: self.serializer.fds,
-                    bytes_written: self.serializer.bytes_written,
+                    size: self.serializer.size,
                     value_sign: None,
                     b: PhantomData,
                 };
                 value.serialize(&mut serializer)?;
-                self.serializer.bytes_written = serializer.bytes_written;
+                self.serializer.size = serializer.size;
 
                 Ok(())
             }
@@ -739,10 +510,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeTuple for StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeTuple for StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -759,10 +529,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeTupleStruct for StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeTupleStruct for StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -779,10 +548,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeTupleVariant for StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeTupleVariant for StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -799,10 +567,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeMap for SeqSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeMap for SeqSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -818,7 +585,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        if self.start + self.first_padding == self.serializer.bytes_written {
+        if self.start == self.serializer.size {
             // First key
             self.serializer
                 .sign_parser
@@ -829,7 +596,7 @@ where
                 .sign_parser
                 .rewind_chars(self.element_signature_len - 2);
         }
-        self.serializer.add_padding(DICT_ENTRY_ALIGNMENT)?;
+        self.serializer.add_padding(DICT_ENTRY_ALIGNMENT);
 
         key.serialize(&mut *self.serializer)
     }
@@ -842,7 +609,7 @@ where
     }
 
     fn end(self) -> Result<()> {
-        if self.start + self.first_padding != self.serializer.bytes_written {
+        if self.start != self.serializer.size {
             // Non-empty map, take }
             self.serializer
                 .sign_parser
@@ -852,10 +619,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeStruct for StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeStruct for StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
@@ -872,10 +638,9 @@ where
     }
 }
 
-impl<'ser, 'sig, 'b, B, W> ser::SerializeStructVariant for StructSerializer<'ser, 'sig, 'b, B, W>
+impl<'ser, 'sig, 'b, B> ser::SerializeStructVariant for StructSerializer<'ser, 'sig, 'b, B>
 where
     B: byteorder::ByteOrder,
-    W: Write + Seek,
 {
     type Ok = ();
     type Error = Error;
