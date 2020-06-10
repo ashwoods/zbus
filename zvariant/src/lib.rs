@@ -165,6 +165,7 @@ pub use into_value::*;
 mod owned_value;
 pub use owned_value::*;
 
+mod framing_offset_size;
 mod signature_parser;
 
 #[cfg(test)]
@@ -488,11 +489,25 @@ mod tests {
         let ctxt = Context::<LE>::new_dbus(0);
         let encoded = to_bytes(ctxt, &ay).unwrap();
         assert_eq!(encoded.len(), 6);
+
         #[cfg(feature = "arrayvec")]
         let decoded: ArrayVec<[u8; 2]> = from_slice(&encoded, ctxt).unwrap();
         #[cfg(not(feature = "arrayvec"))]
         let decoded: Vec<u8> = from_slice(&encoded, ctxt).unwrap();
         assert_eq!(&decoded.as_slice(), &[77u8, 88]);
+
+        // GVariant format now
+        let ctxt = Context::<LE>::new_gvariant(0);
+        let gv_encoded = to_bytes(ctxt, &ay).unwrap();
+        assert_eq!(gv_encoded.len(), 2);
+        let ctxt = Context::<LE>::new_dbus(0);
+
+        // Check encoding against GLib
+        let bytes = Bytes::from_owned(gv_encoded);
+        let variant = Variant::new_from_bytes::<&[u8]>(&bytes);
+        assert_eq!(variant.n_children(), 2);
+        assert_eq!(variant.get_child_value(0).get::<u8>().unwrap(), 77);
+        assert_eq!(variant.get_child_value(1).get::<u8>().unwrap(), 88);
 
         // As Value
         let v: Value = ay[..].into();
@@ -578,6 +593,18 @@ mod tests {
         let a: Array = v.try_into().unwrap();
         let _ve: Vec<String> = a.try_into().unwrap();
 
+        // GVariant format now
+        let ctxt = Context::<LE>::new_gvariant(0);
+        let gv_encoded = to_bytes(ctxt, &as_).unwrap();
+        assert_eq!(gv_encoded.len(), 25);
+
+        // Check encoding against GLib
+        let bytes = Bytes::from_owned(gv_encoded);
+        let variant = Variant::new_from_bytes::<&[&str]>(&bytes);
+        assert_eq!(variant.n_children(), 4);
+        assert_eq!(variant.get_child_value(0).get::<String>().unwrap(), "Hello");
+        assert_eq!(variant.get_child_value(1).get::<String>().unwrap(), "World");
+
         // Array of Struct, which in turn containin an Array (We gotta go deeper!)
         // Signature: "a(yu(xbxas)s)");
         let ar = vec![(
@@ -595,6 +622,7 @@ mod tests {
             // one more top-most simple field
             "hello",
         )];
+        let ctxt = Context::<LE>::new_dbus(0);
         let encoded = to_bytes(ctxt, &ar).unwrap();
         assert_eq!(encoded.len(), 78);
         let decoded =

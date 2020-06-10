@@ -7,6 +7,7 @@ use std::ffi::CStr;
 use std::os::unix::io::RawFd;
 use std::{marker::PhantomData, str};
 
+use crate::framing_offset_size::FramingOffsets;
 use crate::signature_parser::SignatureParser;
 use crate::utils::*;
 use crate::Type;
@@ -661,8 +662,12 @@ struct ArrayDeserializer<'d, 'de, 'sig, 'f, B> {
     de: &'d mut Deserializer<'de, 'sig, 'f, B>,
     len: usize,
     start: usize,
+    // alignement of element
+    element_alignment: usize,
     // where value signature starts
     element_signature_len: usize,
+    // All offsets (GVariant-specific)
+    offsets: Option<FramingOffsets>,
 }
 
 impl<'d, 'de, 'sig, 'f, B> ArrayDeserializer<'d, 'de, 'sig, 'f, B>
@@ -671,18 +676,39 @@ where
 {
     fn new(de: &'d mut Deserializer<'de, 'sig, 'f, B>) -> Result<Self> {
         de.parse_padding(ARRAY_ALIGNMENT_DBUS)?;
-        let len = B::read_u32(de.next_slice(4)?) as usize;
+        let mut len = match de.ctxt.format() {
+            EncodingFormat::DBus => {
+                de.parse_padding(ARRAY_ALIGNMENT_DBUS)?;
+
+                B::read_u32(de.next_slice(4)?) as usize
+            }
+            EncodingFormat::GVariant => de.bytes.len() - de.pos,
+        };
 
         let element_signature_pos = de.sig_parser.pos();
         let rest_of_signature =
             Signature::from_str_unchecked(&de.sig_parser.signature()[element_signature_pos..]);
         let element_signature = slice_signature(&rest_of_signature)?;
-        let alignment = alignment_for_signature(&element_signature, de.ctxt.format());
+        let element_alignment = alignment_for_signature(&element_signature, de.ctxt.format());
         let element_signature_len = element_signature.len();
+        let fixed_sized_child = crate::utils::is_fixed_sized_signature(&element_signature)?;
 
         // D-Bus requires padding for the first element even when there is no first element
-        // (i-e empty array) so we parse padding already.
-        de.parse_padding(alignment)?;
+        // (i-e empty array) so we parse padding already. In case of GVariant this is just
+        // the padding of the array itself since array starts with first element.
+        let padding = de.parse_padding(element_alignment)?;
+        let offsets = match de.ctxt.format() {
+            EncodingFormat::GVariant => {
+                len -= padding;
+
+                if !fixed_sized_child {
+                    Some(FramingOffsets::from_encoded_container(&de.bytes[de.pos..]))
+                } else {
+                    None
+                }
+            }
+            EncodingFormat::DBus => None,
+        };
         let start = de.pos;
 
         let next_signature_char = de.sig_parser.next_char();
@@ -700,7 +726,9 @@ where
             de,
             len,
             start,
+            element_alignment,
             element_signature_len,
+            offsets,
         })
     }
 }
@@ -729,7 +757,31 @@ where
             self.de.sig_parser.rewind_chars(self.element_signature_len);
         }
 
-        let v = seed.deserialize(&mut *self.de).map(Some);
+        let ctxt =
+            EncodingContext::new(self.de.ctxt.format(), self.de.ctxt.position() + self.de.pos);
+        let sig_parser = self.de.sig_parser.clone();
+        let end = match self.offsets.as_mut() {
+            Some(offsets) => match offsets.pop() {
+                Some(offset) => self.de.pos + offset,
+                None => {
+                    return Err(Error::MissingFramingOffset);
+                }
+            },
+            None => self.de.pos + self.len,
+        };
+
+        let mut de = Deserializer::<B> {
+            ctxt,
+            sig_parser,
+            bytes: &self.de.bytes[self.de.pos..end],
+            fds: self.de.fds,
+            pos: 0,
+            b: PhantomData,
+        };
+
+        let v = seed.deserialize(&mut de).map(Some);
+        self.de.pos += de.pos;
+
         if self.de.pos > self.start + self.len {
             return Err(serde::de::Error::invalid_length(
                 self.len,
@@ -763,8 +815,10 @@ where
         if self.start != self.de.pos {
             // The signature needs to be rewinded before encoding each element.
             self.de.sig_parser.rewind_chars(self.element_signature_len);
-            self.de.parse_padding(DICT_ENTRY_ALIGNMENT_DBUS)?;
+            self.de.parse_padding(self.element_alignment)?;
         }
+
+        //for_encoded_container(container_len);
 
         let v = seed.deserialize(&mut *self.de).map(Some);
         if self.de.pos > self.start + self.len {
