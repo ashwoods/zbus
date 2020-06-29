@@ -592,11 +592,14 @@ where
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
         self.sig_parser.skip_char()?;
-        if self.ctxt.format() == EncodingFormat::DBus {
-            self.add_padding(ARRAY_ALIGNMENT_DBUS)?;
-            // Length in bytes (unfortunately not the same as len passed to us here) which we
-            // initially set to 0.
-            self.write_u32::<B>(0_u32).map_err(Error::Io)?;
+        match self.ctxt.format() {
+            EncodingFormat::DBus => {
+                self.add_padding(ARRAY_ALIGNMENT_DBUS)?;
+                // Length in bytes (unfortunately not the same as len passed to us here) which we
+                // initially set to 0.
+                self.write_u32::<B>(0_u32).map_err(Error::Io)?;
+            }
+            _ => (),
         }
 
         let element_signature_pos = self.sig_parser.pos();
@@ -607,6 +610,13 @@ where
         let element_alignment = alignment_for_signature(&element_signature, self.ctxt.format());
         let (offsets, key_start) = match self.ctxt.format() {
             EncodingFormat::GVariant => {
+                let fixed_sized_child = crate::utils::is_fixed_sized_signature(&element_signature)?;
+                let offsets = if !fixed_sized_child {
+                    Some(FramingOffsets::new())
+                } else {
+                    None
+                };
+
                 let key_start = if self.sig_parser.next_char() == DICT_ENTRY_SIG_START_CHAR {
                     let key_signature = Signature::from_str_unchecked(&element_signature[1..2]);
                     if !crate::utils::is_fixed_sized_signature(&key_signature)? {
@@ -614,13 +624,6 @@ where
                     } else {
                         None
                     }
-                } else {
-                    None
-                };
-
-                let fixed_sized_child = crate::utils::is_fixed_sized_signature(&element_signature)?;
-                let offsets = if !fixed_sized_child {
-                    Some(FramingOffsets::new())
                 } else {
                     None
                 };

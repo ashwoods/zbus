@@ -15,7 +15,7 @@ impl FramingOffsets {
         Self(VecDeque::new())
     }
 
-    pub fn from_encoded_container(container: &[u8]) -> Self {
+    pub fn from_encoded_array(container: &[u8]) -> Self {
         let offset_size = FramingOffsetSize::for_encoded_container(container.len());
 
         // The last offset tells us the start of offsets.

@@ -675,7 +675,6 @@ where
     B: byteorder::ByteOrder,
 {
     fn new(de: &'d mut Deserializer<'de, 'sig, 'f, B>) -> Result<Self> {
-        de.parse_padding(ARRAY_ALIGNMENT_DBUS)?;
         let mut len = match de.ctxt.format() {
             EncodingFormat::DBus => {
                 de.parse_padding(ARRAY_ALIGNMENT_DBUS)?;
@@ -702,7 +701,7 @@ where
                 len -= padding;
 
                 if !fixed_sized_child {
-                    Some(FramingOffsets::from_encoded_container(&de.bytes[de.pos..]))
+                    Some(FramingOffsets::from_encoded_array(&de.bytes[de.pos..]))
                 } else {
                     None
                 }
@@ -761,13 +760,21 @@ where
             EncodingContext::new(self.de.ctxt.format(), self.de.ctxt.position() + self.de.pos);
         let sig_parser = self.de.sig_parser.clone();
         let end = match self.offsets.as_mut() {
-            Some(offsets) => match offsets.pop() {
-                Some(offset) => self.de.pos + offset,
-                None => {
-                    return Err(Error::MissingFramingOffset);
+            Some(offsets) => {
+                assert_eq!(self.de.ctxt.format(), EncodingFormat::GVariant);
+
+                match offsets.pop() {
+                    Some(offset) => self.de.pos + offset,
+                    None => {
+                        return Err(Error::MissingFramingOffset);
+                    }
                 }
-            },
-            None => self.de.pos + self.len,
+            }
+            None => {
+                assert_eq!(self.de.ctxt.format(), EncodingFormat::DBus);
+
+                self.start + self.len - self.de.pos
+            }
         };
 
         let mut de = Deserializer::<B> {
@@ -820,7 +827,38 @@ where
 
         //for_encoded_container(container_len);
 
-        let v = seed.deserialize(&mut *self.de).map(Some);
+        let ctxt =
+            EncodingContext::new(self.de.ctxt.format(), self.de.ctxt.position() + self.de.pos);
+        let sig_parser = self.de.sig_parser.clone();
+        let end = match self.offsets.as_mut() {
+            Some(offsets) => {
+                assert_eq!(self.de.ctxt.format(), EncodingFormat::GVariant);
+
+                match offsets.pop() {
+                    Some(offset) => self.de.pos + offset,
+                    None => {
+                        return Err(Error::MissingFramingOffset);
+                    }
+                }
+            }
+            None => {
+                assert_eq!(self.de.ctxt.format(), EncodingFormat::DBus);
+
+                self.start + self.len - self.de.pos
+            }
+        };
+
+        let mut de = Deserializer::<B> {
+            ctxt,
+            sig_parser,
+            bytes: &self.de.bytes[self.de.pos..end],
+            fds: self.de.fds,
+            pos: 0,
+            b: PhantomData,
+        };
+        let v = seed.deserialize(&mut de).map(Some);
+        self.de.pos += de.pos;
+
         if self.de.pos > self.start + self.len {
             return Err(serde::de::Error::invalid_length(
                 self.len,
