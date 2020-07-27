@@ -15,6 +15,21 @@ use crate::{fdo, Error, Guid, Message, MessageError, MessageType, Result, MIN_ME
 
 type MessageHandlerFn = Box<dyn FnMut(Message) -> Option<Message>>;
 
+#[derive(derivative::Derivative)]
+#[derivative(Debug)]
+struct ConnectionInner {
+    server_guid: Guid,
+    cap_unix_fd: bool,
+    unique_name: RefCell<Option<String>>,
+
+    stream: UnixStream,
+    // Serial number for next outgoing message
+    serial: AtomicU32,
+
+    #[derivative(Debug = "ignore")]
+    default_msg_handler: RefCell<Option<MessageHandlerFn>>,
+}
+
 /// A D-Bus connection.
 ///
 /// A connection to a D-Bus bus, or a direct peer.
@@ -46,24 +61,12 @@ type MessageHandlerFn = Box<dyn FnMut(Message) -> Option<Message>>;
 /// [`dbus_interface`]: attr.dbus_interface.html
 /// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
 /// [file an issue]: https://gitlab.freedesktop.org/zeenix/zbus/-/issues/new
-#[derive(derivative::Derivative, Clone)]
-#[derivative(Debug)]
-pub struct Connection {
-    server_guid: Guid,
-    cap_unix_fd: bool,
-    unique_name: Option<String>,
-
-    stream: Rc<UnixStream>,
-    // Serial number for next outgoing message
-    serial: Rc<AtomicU32>,
-
-    #[derivative(Debug = "ignore")]
-    default_msg_handler: Rc<Option<RefCell<MessageHandlerFn>>>,
-}
+#[derive(Debug, Clone)]
+pub struct Connection(Rc<ConnectionInner>);
 
 impl AsRawFd for Connection {
     fn as_raw_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
+        self.0.stream.as_raw_fd()
     }
 }
 
@@ -109,11 +112,11 @@ impl Connection {
 
         stream.write_all(b"BEGIN\r\n")?;
 
-        let mut connection = Connection::new_authenticated(stream, server_guid, cap_unix_fd);
+        let connection = Connection::new_authenticated(stream, server_guid, cap_unix_fd);
 
         if bus_connection {
             // Now that the server has approved us, we must send the bus Hello, as per specs
-            connection.unique_name = Some(
+            connection.0.unique_name.borrow_mut().replace(
                 fdo::DBusProxy::new(&connection)?
                     .hello()
                     .map_err(|e| Error::Handshake(format!("Hello failed: {}", e)))?,
@@ -228,12 +231,12 @@ impl Connection {
 
     /// The server's GUID.
     pub fn server_guid(&self) -> &str {
-        self.server_guid.as_str()
+        self.0.server_guid.as_str()
     }
 
     /// The unique name as assigned by the message bus or `None` if not a message bus connection.
     pub fn unique_name(&self) -> Option<&str> {
-        self.unique_name.as_deref()
+        self.0.unique_name.borrow().as_deref()
     }
 
     /// Fetch the next message from the connection.
@@ -250,7 +253,7 @@ impl Connection {
         let mut buf = [0; MIN_MESSAGE_SIZE];
 
         loop {
-            let mut fds = read_exact(&self.stream, &mut buf[..])?;
+            let mut fds = read_exact(&self.0.stream, &mut buf[..])?;
 
             let mut incoming = Message::from_bytes(&buf)?;
             let bytes_left = incoming.bytes_to_completion()?;
@@ -258,13 +261,13 @@ impl Connection {
                 return Err(Error::Message(MessageError::InsufficientData));
             }
             let mut buf = vec![0; bytes_left as usize];
-            fds.append(&mut read_exact(&self.stream, &mut buf[..])?);
+            fds.append(&mut read_exact(&self.0.stream, &mut buf[..])?);
             incoming.add_bytes(&buf[..])?;
             incoming.set_owned_fds(fds);
 
-            if let Some(ref handler) = *self.default_msg_handler {
+            if let Some(ref mut handler) = &mut *self.0.default_msg_handler.borrow_mut() {
                 // Let's see if the default handler wants the message first
-                match (&mut *handler.borrow_mut())(incoming) {
+                match handler(incoming) {
                     // Message was returned to us so we can return that
                     Some(m) => return Ok(m),
                     None => continue,
@@ -281,7 +284,7 @@ impl Connection {
     ///
     /// On successfully sending off `msg`, the assigned serial number is returned.
     pub fn send_message(&self, mut msg: Message) -> Result<u32> {
-        if !msg.fds().is_empty() && !self.cap_unix_fd {
+        if !msg.fds().is_empty() && !self.0.cap_unix_fd {
             return Err(Error::Unsupported);
         }
 
@@ -292,7 +295,7 @@ impl Connection {
             Ok(())
         })?;
 
-        write_all(&self.stream, msg.as_bytes(), &msg.fds())?;
+        write_all(&self.0.stream, msg.as_bytes(), &msg.fds())?;
         Ok(serial)
     }
 
@@ -319,7 +322,7 @@ impl Connection {
         B: serde::ser::Serialize + zvariant::Type,
     {
         let m = Message::method(
-            self.unique_name.as_deref(),
+            self.0.unique_name.borrow().as_deref(),
             destination,
             path,
             iface,
@@ -360,7 +363,7 @@ impl Connection {
         B: serde::ser::Serialize + zvariant::Type,
     {
         let m = Message::signal(
-            self.unique_name.as_deref(),
+            self.0.unique_name.borrow().as_deref(),
             destination,
             path,
             iface,
@@ -383,7 +386,7 @@ impl Connection {
     where
         B: serde::ser::Serialize + zvariant::Type,
     {
-        let m = Message::method_reply(self.unique_name.as_deref(), call, body)?;
+        let m = Message::method_reply(self.0.unique_name.borrow().as_deref(), call, body)?;
         self.send_message(m)
     }
 
@@ -397,7 +400,12 @@ impl Connection {
     where
         B: serde::ser::Serialize + zvariant::Type,
     {
-        let m = Message::method_error(self.unique_name.as_deref(), call, error_name, body)?;
+        let m = Message::method_error(
+            self.0.unique_name.borrow().as_deref(),
+            call,
+            error_name,
+            body,
+        )?;
         self.send_message(m)
     }
 
@@ -409,29 +417,29 @@ impl Connection {
     ///
     /// [`receive_message`]: struct.Connection.html#method.receive_message
     pub fn set_default_message_handler(&mut self, handler: MessageHandlerFn) {
-        self.default_msg_handler = Rc::new(Some(RefCell::new(handler)));
+        self.0.default_msg_handler.borrow_mut().replace(handler);
     }
 
     /// Reset the default message handler.
     ///
     /// Remove the previously set message handler from `set_default_message_handler`.
     pub fn reset_default_message_handler(&mut self) {
-        self.default_msg_handler = Rc::new(None);
+        self.0.default_msg_handler.borrow_mut().take();
     }
 
     fn new_authenticated(stream: UnixStream, server_guid: Guid, cap_unix_fd: bool) -> Self {
-        Self {
-            stream: Rc::new(stream),
+        Self(Rc::new(ConnectionInner {
+            stream,
             server_guid,
             cap_unix_fd,
-            serial: Rc::new(AtomicU32::new(1)),
-            unique_name: None,
-            default_msg_handler: Rc::new(None),
-        }
+            serial: AtomicU32::new(1),
+            unique_name: RefCell::new(None),
+            default_msg_handler: RefCell::new(None),
+        }))
     }
 
     fn next_serial(&self) -> u32 {
-        self.serial.fetch_add(1, Ordering::SeqCst)
+        self.0.serial.fetch_add(1, Ordering::SeqCst)
     }
 }
 
