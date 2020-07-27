@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{env, io};
 
@@ -29,6 +30,12 @@ type MessageHandlerFn = Box<dyn FnMut(Message) -> Option<Message>>;
 /// with [`new_system`]. Then the connection is shared with the [`Proxy`] and [`ObjectServer`]
 /// instances.
 ///
+/// `Connection` implements [`Clone`] and cloning it is a very cheap operation, as the underlying
+/// data is not cloned. This makes it very convenient to share the connection between different
+/// parts of your code. Please note however, that sharing or sending of a connection instance
+/// across threads is not supported. If you've a valid use cas for that, please [file an issue]
+/// about it and we'll consider adding this feature.
+///
 /// [method calls]: struct.Connection.html#method.call_method
 /// [signals]: struct.Connection.html#method.emit_signal
 /// [`new_system`]: struct.Connection.html#method.new_system
@@ -37,19 +44,21 @@ type MessageHandlerFn = Box<dyn FnMut(Message) -> Option<Message>>;
 /// [`ObjectServer`]: struct.ObjectServer.html
 /// [`dbus_proxy`]: attr.dbus_proxy.html
 /// [`dbus_interface`]: attr.dbus_interface.html
-#[derive(derivative::Derivative)]
+/// [`Clone`]: https://doc.rust-lang.org/std/clone/trait.Clone.html
+/// [file an issue]: https://gitlab.freedesktop.org/zeenix/zbus/-/issues/new
+#[derive(derivative::Derivative, Clone)]
 #[derivative(Debug)]
 pub struct Connection {
     server_guid: Guid,
     cap_unix_fd: bool,
     unique_name: Option<String>,
 
-    stream: UnixStream,
+    stream: Rc<UnixStream>,
     // Serial number for next outgoing message
-    serial: AtomicU32,
+    serial: Rc<AtomicU32>,
 
     #[derivative(Debug = "ignore")]
-    default_msg_handler: Option<RefCell<MessageHandlerFn>>,
+    default_msg_handler: Rc<Option<RefCell<MessageHandlerFn>>>,
 }
 
 impl AsRawFd for Connection {
@@ -253,7 +262,7 @@ impl Connection {
             incoming.add_bytes(&buf[..])?;
             incoming.set_owned_fds(fds);
 
-            if let Some(ref handler) = self.default_msg_handler {
+            if let Some(ref handler) = *self.default_msg_handler {
                 // Let's see if the default handler wants the message first
                 match (&mut *handler.borrow_mut())(incoming) {
                     // Message was returned to us so we can return that
@@ -400,24 +409,24 @@ impl Connection {
     ///
     /// [`receive_message`]: struct.Connection.html#method.receive_message
     pub fn set_default_message_handler(&mut self, handler: MessageHandlerFn) {
-        self.default_msg_handler = Some(RefCell::new(handler));
+        self.default_msg_handler = Rc::new(Some(RefCell::new(handler)));
     }
 
     /// Reset the default message handler.
     ///
     /// Remove the previously set message handler from `set_default_message_handler`.
     pub fn reset_default_message_handler(&mut self) {
-        self.default_msg_handler = None;
+        self.default_msg_handler = Rc::new(None);
     }
 
     fn new_authenticated(stream: UnixStream, server_guid: Guid, cap_unix_fd: bool) -> Self {
         Self {
-            stream,
+            stream: Rc::new(stream),
             server_guid,
             cap_unix_fd,
-            serial: AtomicU32::new(1),
+            serial: Rc::new(AtomicU32::new(1)),
             unique_name: None,
-            default_msg_handler: None,
+            default_msg_handler: Rc::new(None),
         }
     }
 
