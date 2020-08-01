@@ -44,6 +44,7 @@ pub fn expand(args: AttributeArgs, input: ItemTrait) -> TokenStream {
 
     let doc = get_doc_attrs(&input.attrs);
     let proxy_name = Ident::new(&format!("{}Proxy", input.ident), Span::call_site());
+    let owned_name = Ident::new(&format!("Owned{}", proxy_name), Span::call_site());
     let ident = input.ident.to_string();
     let name = iface_name.unwrap_or(format!("org.freedesktop.{}", ident));
     let default_path = default_path.unwrap_or(format!("/org/freedesktop/{}", ident));
@@ -97,7 +98,7 @@ pub fn expand(args: AttributeArgs, input: ItemTrait) -> TokenStream {
 
         impl<'c> #proxy_name<'c> {
             /// Creates a new proxy with the default service & path.
-            pub fn new(conn: &#zbus::Connection) -> #zbus::Result<Self> {
+            pub fn new(conn: &'c #zbus::Connection) -> #zbus::Result<Self> {
                 Ok(Self(#zbus::Proxy::new(
                     conn,
                     #default_service,
@@ -107,7 +108,7 @@ pub fn expand(args: AttributeArgs, input: ItemTrait) -> TokenStream {
             }
 
             /// Creates a new proxy for the given `destination` and `path`.
-            pub fn new_for(conn: &#zbus::Connection, destination: &'c str, path: &'c str) -> #zbus::Result<Self> {
+            pub fn new_for(conn: &'c #zbus::Connection, destination: &'c str, path: &'c str) -> #zbus::Result<Self> {
                 Ok(Self(#zbus::Proxy::new(
                     conn,
                     destination,
@@ -116,17 +117,32 @@ pub fn expand(args: AttributeArgs, input: ItemTrait) -> TokenStream {
                 )?))
             }
 
-            /// Same as `new_for` but takes ownership of the passed arguments.
-            pub fn new_for_owned(conn: #zbus::Connection, destination: String, path: String) -> #zbus::Result<Self> {
-                Ok(Self(#zbus::Proxy::new_owned(
+            #methods
+        }
+
+        /// Owned version of `#proxy_name`.
+        pub struct #owned_name(#zbus::OwnedProxy);
+
+        impl #owned_name {
+            /// Creates a new proxy with the default service & path.
+            pub fn new(conn: #zbus::Connection) -> #zbus::Result<Self> {
+                Ok(Self(#zbus::OwnedProxy::new(
+                    conn,
+                    #default_service.to_owned(),
+                    #default_path.to_owned(),
+                    #name.to_owned(),
+                )?))
+            }
+
+            /// Creates a new proxy with the default service & path.
+            pub fn new_for(conn: #zbus::Connection, destination: String, path: String) -> #zbus::Result<Self> {
+                Ok(Self(#zbus::OwnedProxy::new(
                     conn,
                     destination,
                     path,
                     #name.to_owned(),
                 )?))
             }
-
-            #methods
         }
     };
 

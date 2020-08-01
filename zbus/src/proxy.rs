@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::convert::{TryFrom, TryInto};
+use std::ops::Deref;
 use zvariant::{OwnedValue, Value};
 
 use crate::{Connection, Error, Message, Result};
@@ -48,7 +49,7 @@ use crate::fdo::{self, IntrospectableProxy, PropertiesProxy};
 ///
 /// [`dbus_proxy`]: attr.dbus_proxy.html
 pub struct Proxy<'a> {
-    conn: Connection,
+    conn: Cow<'a, Connection>,
     destination: Cow<'a, str>,
     path: Cow<'a, str>,
     interface: Cow<'a, str>,
@@ -57,29 +58,13 @@ pub struct Proxy<'a> {
 impl<'a> Proxy<'a> {
     /// Create a new `Proxy` for the given destination/path/interface.
     pub fn new(
-        conn: &Connection,
+        conn: &'a Connection,
         destination: &'a str,
         path: &'a str,
         interface: &'a str,
     ) -> Result<Self> {
         Ok(Self {
-            conn: conn.clone(),
-            destination: Cow::from(destination),
-            path: Cow::from(path),
-            interface: Cow::from(interface),
-        })
-    }
-
-    /// Create a new `Proxy` for the given destination/path/interface, taking ownership of all
-    /// passed arguments.
-    pub fn new_owned(
-        conn: Connection,
-        destination: String,
-        path: String,
-        interface: String,
-    ) -> Result<Self> {
-        Ok(Self {
-            conn,
+            conn: Cow::Borrowed(conn),
             destination: Cow::from(destination),
             path: Cow::from(path),
             interface: Cow::from(interface),
@@ -159,5 +144,38 @@ impl<'a> Proxy<'a> {
         R: serde::de::DeserializeOwned + zvariant::Type,
     {
         Ok(self.call_method(method_name, body)?.body()?)
+    }
+}
+
+/// Owned version of [`Proxy`].
+///
+/// If you need to keep the proxy instance around (e.g in a struct), you'll find this type more
+/// convenient to use.
+///
+/// [`Proxy`]: struct.Proxy.html
+pub struct OwnedProxy(Proxy<'static>);
+
+impl OwnedProxy {
+    /// Create a new `OwnedProxy` for the given destination/path/interface.
+    pub fn new(
+        conn: Connection,
+        destination: String,
+        path: String,
+        interface: String,
+    ) -> Result<Self> {
+        Ok(Self(Proxy {
+            conn: Cow::Owned(conn),
+            destination: Cow::from(destination),
+            path: Cow::from(path),
+            interface: Cow::from(interface),
+        }))
+    }
+}
+
+impl Deref for OwnedProxy {
+    type Target = Proxy<'static>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
