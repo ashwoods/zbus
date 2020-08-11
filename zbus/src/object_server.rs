@@ -142,21 +142,24 @@ impl Properties {
     ) -> Result<()>;
 }
 
-#[derive(Default, derivative::Derivative)]
+#[derive(Default, Clone, derivative::Derivative)]
 #[derivative(Debug)]
-struct Node {
+struct NodeInner {
     path: String,
-    children: HashMap<String, Node>,
+    children: RefCell<HashMap<String, Node>>,
     #[derivative(Debug = "ignore")]
-    interfaces: HashMap<&'static str, Rc<RefCell<dyn Interface>>>,
+    interfaces: RefCell<HashMap<&'static str, Rc<RefCell<dyn Interface>>>>,
 }
+
+#[derive(Default, Debug, Clone)]
+struct Node(Rc<NodeInner>);
 
 impl Node {
     fn new(path: &str) -> Self {
-        let mut node = Self {
+        let mut node = Self(Rc::new(NodeInner {
             path: path.to_string(),
             ..Default::default()
-        };
+        }));
         node.at(Peer::name(), Peer);
         node.at(Introspectable::name(), Introspectable);
         node.at(Properties::name(), Properties);
@@ -164,14 +167,14 @@ impl Node {
     }
 
     fn get_interface(&self, iface: &str) -> Option<Rc<RefCell<dyn Interface + 'static>>> {
-        self.interfaces.get(iface).cloned()
+        self.0.interfaces.borrow().get(iface).cloned()
     }
 
     fn at<I>(&mut self, name: &'static str, iface: I) -> bool
     where
         I: Interface + 'static,
     {
-        match self.interfaces.entry(name) {
+        match self.0.interfaces.borrow_mut().entry(name) {
             Entry::Vacant(e) => e.insert(Rc::new(RefCell::new(iface))),
             _ => return false,
         };
@@ -191,11 +194,11 @@ impl Node {
             .unwrap();
         }
 
-        for iface in self.interfaces.values() {
+        for iface in self.0.interfaces.borrow().values() {
             iface.borrow().introspect_to_writer(writer, level + 2);
         }
 
-        for (path, node) in &self.children {
+        for (path, node) in &*self.0.children.borrow() {
             let level = level + 2;
             writeln!(
                 writer,
@@ -236,7 +239,7 @@ impl Node {
             return Err(Error::NoTLSConnection);
         }
 
-        LOCAL_CONNECTION.with(|conn| conn.emit_signal(dest, &self.path, iface, signal_name, body))
+        LOCAL_CONNECTION.with(|conn| conn.emit_signal(dest, &self.0.path, iface, signal_name, body))
     }
 }
 
@@ -324,8 +327,8 @@ impl<'a> ObjectServer<'a> {
     }
 
     // Get the Node at path. Optionally create one if it doesn't exist.
-    fn get_node(&mut self, path: &ObjectPath, create: bool) -> Option<&mut Node> {
-        let mut node = &mut self.root;
+    fn get_node(&mut self, path: &ObjectPath, create: bool) -> Option<Node> {
+        let mut node = self.root.clone();
         let mut node_path = String::new();
 
         for i in path.split('/').skip(1) {
@@ -333,15 +336,16 @@ impl<'a> ObjectServer<'a> {
                 continue;
             }
             write!(&mut node_path, "/{}", i).unwrap();
-            match node.children.entry(i.into()) {
+            match self.root.0.children.borrow_mut().entry(i.into()) {
                 Entry::Vacant(e) => {
                     if create {
-                        node = e.insert(Node::new(&node_path));
+                        node = Node::new(&node_path);
+                        e.insert(node.clone());
                     } else {
                         return None;
                     }
                 }
-                Entry::Occupied(e) => node = e.into_mut(),
+                Entry::Occupied(e) => node = e.get().clone(),
             }
         }
 
@@ -417,7 +421,7 @@ impl<'a> ObjectServer<'a> {
         })?;
 
         LOCAL_CONNECTION.set(&conn, || {
-            LOCAL_NODE.set(node, || {
+            LOCAL_NODE.set(&node, || {
                 let res = iface.borrow().call(&conn, &msg, member);
                 res.or_else(|| iface.borrow_mut().call_mut(&conn, &msg, member))
                     .ok_or_else(|| {
