@@ -11,7 +11,6 @@ use zvariant::{ObjectPath, OwnedValue, Value};
 use crate as zbus;
 use crate::{dbus_interface, fdo, Connection, Error, Message, MessageHeader, MessageType, Result};
 
-scoped_thread_local!(static LOCAL_NODE: Node);
 scoped_thread_local!(static LOCAL_CONNECTION: Connection);
 
 /// The trait used to dispatch messages to an interface instance.
@@ -50,12 +49,14 @@ pub trait Interface {
     fn introspect_to_writer(&self, writer: &mut dyn Write, level: usize);
 }
 
-struct Introspectable;
+struct Introspectable {
+    node: Node,
+}
 
 #[dbus_interface(name = "org.freedesktop.DBus.Introspectable")]
 impl Introspectable {
     fn introspect(&self) -> String {
-        LOCAL_NODE.with(|node| node.introspect())
+        self.node.introspect()
     }
 }
 
@@ -86,21 +87,21 @@ impl Peer {
     }
 }
 
-struct Properties;
+struct Properties {
+    node: Node,
+}
 
 #[dbus_interface(name = "org.freedesktop.DBus.Properties")]
 impl Properties {
     fn get(&self, interface_name: &str, property_name: &str) -> fdo::Result<OwnedValue> {
-        LOCAL_NODE.with(|node| {
-            let iface = node.get_interface(interface_name).ok_or_else(|| {
-                fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
-            })?;
+        let iface = self.node.get_interface(interface_name).ok_or_else(|| {
+            fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
+        })?;
 
-            let res = iface.borrow().get(property_name);
-            res.ok_or_else(|| {
-                fdo::Error::UnknownProperty(format!("Unknown property '{}'", property_name))
-            })?
-        })
+        let res = iface.borrow().get(property_name);
+        res.ok_or_else(|| {
+            fdo::Error::UnknownProperty(format!("Unknown property '{}'", property_name))
+        })?
     }
 
     // TODO: should be able to take a &Value instead (but obscure deserialize error for now..)
@@ -110,27 +111,23 @@ impl Properties {
         property_name: &str,
         value: OwnedValue,
     ) -> fdo::Result<()> {
-        LOCAL_NODE.with(|node| {
-            let iface = node.get_interface(interface_name).ok_or_else(|| {
-                fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
-            })?;
+        let iface = self.node.get_interface(interface_name).ok_or_else(|| {
+            fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
+        })?;
 
-            let res = iface.borrow_mut().set(property_name, &value);
-            res.ok_or_else(|| {
-                fdo::Error::UnknownProperty(format!("Unknown property '{}'", property_name))
-            })?
-        })
+        let res = iface.borrow_mut().set(property_name, &value);
+        res.ok_or_else(|| {
+            fdo::Error::UnknownProperty(format!("Unknown property '{}'", property_name))
+        })?
     }
 
     fn get_all(&self, interface_name: &str) -> fdo::Result<HashMap<String, OwnedValue>> {
-        LOCAL_NODE.with(|node| {
-            let iface = node.get_interface(interface_name).ok_or_else(|| {
-                fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
-            })?;
+        let iface = self.node.get_interface(interface_name).ok_or_else(|| {
+            fdo::Error::UnknownInterface(format!("Unknown interface '{}'", interface_name))
+        })?;
 
-            let res = iface.borrow().get_all();
-            Ok(res)
-        })
+        let res = iface.borrow().get_all();
+        Ok(res)
     }
 
     #[dbus_interface(signal)]
@@ -161,8 +158,11 @@ impl Node {
             ..Default::default()
         }));
         node.at(Peer::name(), Peer);
-        node.at(Introspectable::name(), Introspectable);
-        node.at(Properties::name(), Properties);
+        node.at(
+            Introspectable::name(),
+            Introspectable { node: node.clone() },
+        );
+        node.at(Properties::name(), Properties { node: node.clone() });
         node
     }
 
@@ -364,29 +364,6 @@ impl<'a> ObjectServer<'a> {
         Ok(self.get_node(path, true).unwrap().at(I::name(), iface))
     }
 
-    /// Emit a signal on the currently dispatched node.
-    ///
-    /// This is an internal helper function to emit a signal on on the current node. You shouldn't
-    /// call this method directly, rather with the derived signal implementation from
-    /// [`dbus_interface`].
-    ///
-    /// [`dbus_interface`]: attr.dbus_interface.html
-    pub fn local_node_emit_signal<B>(
-        destination: Option<&str>,
-        iface: &str,
-        signal_name: &str,
-        body: &B,
-    ) -> Result<()>
-    where
-        B: serde::ser::Serialize + zvariant::Type,
-    {
-        if !LOCAL_NODE.is_set() {
-            return Err(Error::NoTLSNode);
-        }
-
-        LOCAL_NODE.with(|n| n.emit_signal(destination, iface, signal_name, body))
-    }
-
     fn dispatch_method_call_try(
         &mut self,
         msg_header: &MessageHeader,
@@ -421,13 +398,9 @@ impl<'a> ObjectServer<'a> {
         })?;
 
         LOCAL_CONNECTION.set(&conn, || {
-            LOCAL_NODE.set(&node, || {
-                let res = iface.borrow().call(&conn, &msg, member);
-                res.or_else(|| iface.borrow_mut().call_mut(&conn, &msg, member))
-                    .ok_or_else(|| {
-                        fdo::Error::UnknownMethod(format!("Unknown method '{}'", member))
-                    })
-            })
+            let res = iface.borrow().call(&conn, &msg, member);
+            res.or_else(|| iface.borrow_mut().call_mut(&conn, &msg, member))
+                .ok_or_else(|| fdo::Error::UnknownMethod(format!("Unknown method '{}'", member)))
         })
     }
 
