@@ -11,7 +11,7 @@ use zvariant::{ObjectPath, OwnedValue, Value};
 use crate as zbus;
 use crate::{dbus_interface, fdo, Connection, Error, Message, MessageHeader, MessageType, Result};
 
-scoped_thread_local!(static LOCAL_NODE: Node);
+scoped_thread_local!(static LOCAL_NODE: ObjectNode);
 scoped_thread_local!(static LOCAL_CONNECTION: Connection);
 
 /// The trait used to dispatch messages to an interface instance.
@@ -144,14 +144,14 @@ impl Properties {
 
 #[derive(Default, derivative::Derivative)]
 #[derivative(Debug)]
-struct Node {
+struct ObjectNode {
     path: String,
-    children: HashMap<String, Node>,
+    children: HashMap<String, ObjectNode>,
     #[derivative(Debug = "ignore")]
     interfaces: HashMap<&'static str, Rc<RefCell<dyn Interface>>>,
 }
 
-impl Node {
+impl ObjectNode {
     fn new(path: &str) -> Self {
         let mut node = Self {
             path: path.to_string(),
@@ -310,7 +310,7 @@ impl Node {
 #[derive(Debug)]
 pub struct ObjectServer<'a> {
     conn: Connection,
-    root: Node,
+    root: ObjectNode,
     phantom: PhantomData<&'a ()>,
 }
 
@@ -319,13 +319,13 @@ impl<'a> ObjectServer<'a> {
     pub fn new(connection: &Connection) -> Self {
         Self {
             conn: connection.clone(),
-            root: Node::new("/"),
+            root: ObjectNode::new("/"),
             phantom: PhantomData,
         }
     }
 
-    // Get the Node at path. Optionally create one if it doesn't exist.
-    fn get_node(&mut self, path: &ObjectPath, create: bool) -> Option<&mut Node> {
+    // Get the ObjectNode at path. Optionally create one if it doesn't exist.
+    fn get_node(&mut self, path: &ObjectPath, create: bool) -> Option<&mut ObjectNode> {
         let mut node = &mut self.root;
         let mut node_path = String::new();
 
@@ -337,7 +337,7 @@ impl<'a> ObjectServer<'a> {
             match node.children.entry(i.into()) {
                 Entry::Vacant(e) => {
                     if create {
-                        node = e.insert(Node::new(&node_path));
+                        node = e.insert(ObjectNode::new(&node_path));
                     } else {
                         return None;
                     }
@@ -361,10 +361,10 @@ impl<'a> ObjectServer<'a> {
         Ok(self.get_node(path, true).unwrap().at(I::name(), iface))
     }
 
-    /// Emit a signal on the currently dispatched node.
+    /// Emit a signal on the currently dispatched object node.
     ///
-    /// This is an internal helper function to emit a signal on on the current node. You shouldn't
-    /// call this method directly, rather with the derived signal implementation from
+    /// This is an internal helper function to emit a signal on the current object node. You
+    /// shouldn't call this method directly, rather with the derived signal implementation from
     /// [`dbus_interface`].
     ///
     /// [`dbus_interface`]: attr.dbus_interface.html
