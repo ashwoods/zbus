@@ -29,6 +29,7 @@ pub enum Error {
     /// Unsupported function, or support currently lacking.
     Unsupported,
     /// Thread-local connection is not set.
+    #[deprecated(since = "1.1.0", note = "No longer returned by any of our API")]
     NoTLSConnection,
     /// Thread-local node is not set.
     NoTLSNode,
@@ -55,6 +56,7 @@ impl error::Error for Error {
             Error::MethodError(_, _, _) => None,
             Error::InvalidGUID => None,
             Error::Unsupported => None,
+            #[allow(deprecated)]
             Error::NoTLSConnection => None,
             Error::NoTLSNode => None,
         }
@@ -78,6 +80,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidGUID => write!(f, "Invalid GUID"),
             Error::Unsupported => write!(f, "Connection support is lacking"),
+            #[allow(deprecated)]
             Error::NoTLSConnection => write!(f, "No TLS connection"),
             Error::NoTLSNode => write!(f, "No TLS node"),
         }

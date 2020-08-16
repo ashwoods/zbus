@@ -12,7 +12,6 @@ use crate as zbus;
 use crate::{dbus_interface, fdo, Connection, Error, Message, MessageHeader, MessageType, Result};
 
 scoped_thread_local!(static LOCAL_NODE: ObjectNode);
-scoped_thread_local!(static LOCAL_CONNECTION: Connection);
 
 /// The trait used to dispatch messages to an interface instance.
 ///
@@ -142,20 +141,23 @@ impl Properties {
     ) -> Result<()>;
 }
 
-#[derive(Default, derivative::Derivative)]
+#[derive(derivative::Derivative)]
 #[derivative(Debug)]
 struct ObjectNode {
     path: String,
     children: HashMap<String, ObjectNode>,
     #[derivative(Debug = "ignore")]
     interfaces: HashMap<&'static str, Rc<RefCell<dyn Interface>>>,
+    conn: Connection,
 }
 
 impl ObjectNode {
-    fn new(path: &str) -> Self {
+    fn new(path: &str, connection: &Connection) -> Self {
         let mut node = Self {
             path: path.to_string(),
-            ..Default::default()
+            children: HashMap::new(),
+            interfaces: HashMap::new(),
+            conn: connection.clone(),
         };
         node.at(Peer::name(), Peer);
         node.at(Introspectable::name(), Introspectable);
@@ -233,11 +235,8 @@ impl ObjectNode {
     where
         B: serde::ser::Serialize + zvariant::Type,
     {
-        if !LOCAL_CONNECTION.is_set() {
-            return Err(Error::NoTLSConnection);
-        }
-
-        LOCAL_CONNECTION.with(|conn| conn.emit_signal(dest, &self.path, iface, signal_name, body))
+        self.conn
+            .emit_signal(dest, &self.path, iface, signal_name, body)
     }
 }
 
@@ -319,7 +318,7 @@ impl<'a> ObjectServer<'a> {
     pub fn new(connection: &Connection) -> Self {
         Self {
             conn: connection.clone(),
-            root: ObjectNode::new("/"),
+            root: ObjectNode::new("/", connection),
             phantom: PhantomData,
         }
     }
@@ -337,7 +336,7 @@ impl<'a> ObjectServer<'a> {
             match node.children.entry(i.into()) {
                 Entry::Vacant(e) => {
                     if create {
-                        node = e.insert(ObjectNode::new(&node_path));
+                        node = e.insert(ObjectNode::new(&node_path, &self.conn));
                     } else {
                         return None;
                     }
@@ -417,14 +416,10 @@ impl<'a> ObjectServer<'a> {
             fdo::Error::UnknownInterface(format!("Unknown interface '{}'", iface))
         })?;
 
-        LOCAL_CONNECTION.set(&conn, || {
-            LOCAL_NODE.set(node, || {
-                let res = iface.borrow().call(&conn, &msg, member);
-                res.or_else(|| iface.borrow_mut().call_mut(&conn, &msg, member))
-                    .ok_or_else(|| {
-                        fdo::Error::UnknownMethod(format!("Unknown method '{}'", member))
-                    })
-            })
+        LOCAL_NODE.set(node, || {
+            let res = iface.borrow().call(&conn, &msg, member);
+            res.or_else(|| iface.borrow_mut().call_mut(&conn, &msg, member))
+                .ok_or_else(|| fdo::Error::UnknownMethod(format!("Unknown method '{}'", member)))
         })
     }
 
