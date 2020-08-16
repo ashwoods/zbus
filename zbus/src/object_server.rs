@@ -383,6 +383,28 @@ impl<'a> ObjectServer<'a> {
         LOCAL_NODE.with(|n| n.emit_signal(destination, iface, signal_name, body))
     }
 
+    /// Emit a signal on the object specified by `path`.
+    ///
+    /// Returns `Ok(true)` if `self` i
+    ///
+    pub fn emit_signal<B>(
+        &mut self,
+        destination: Option<&str>,
+        path: &ObjectPath,
+        iface: &str,
+        signal_name: &str,
+        body: &B,
+    ) -> Result<()>
+    where
+        B: serde::ser::Serialize + zvariant::Type,
+    {
+        let node = self
+            .get_node(path, false)
+            .ok_or_else(|| Error::UnknownObject(path.to_owned()))?;
+
+        node.emit_signal(destination, iface, signal_name, body)
+    }
+
     fn dispatch_method_call_try(
         &mut self,
         msg_header: &MessageHeader,

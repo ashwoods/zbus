@@ -1,5 +1,5 @@
 use std::{error, fmt, io};
-use zvariant::Error as VariantError;
+use zvariant::{Error as VariantError, ObjectPath};
 
 use crate::{Message, MessageError, MessageType};
 
@@ -32,6 +32,8 @@ pub enum Error {
     NoTLSConnection,
     /// Thread-local node is not set.
     NoTLSNode,
+    /// Unknown object specified.
+    UnknownObject(ObjectPath<'static>),
 }
 
 impl PartialEq for Error {
@@ -57,6 +59,7 @@ impl error::Error for Error {
             Error::Unsupported => None,
             Error::NoTLSConnection => None,
             Error::NoTLSNode => None,
+            Error::UnknownObject(_) => None,
         }
     }
 }
@@ -80,6 +83,7 @@ impl fmt::Display for Error {
             Error::Unsupported => write!(f, "Connection support is lacking"),
             Error::NoTLSConnection => write!(f, "No TLS connection"),
             Error::NoTLSNode => write!(f, "No TLS node"),
+            Error::UnknownObject(path) => write!(f, "Unknown object at path {} specified", path),
         }
     }
 }
