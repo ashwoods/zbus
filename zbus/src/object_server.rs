@@ -144,7 +144,7 @@ impl Properties {
 #[derive(derivative::Derivative)]
 #[derivative(Debug)]
 struct ObjectNode {
-    path: String,
+    path: ObjectPath<'static>,
     children: HashMap<String, ObjectNode>,
     #[derivative(Debug = "ignore")]
     interfaces: HashMap<&'static str, Rc<RefCell<dyn Interface>>>,
@@ -152,9 +152,9 @@ struct ObjectNode {
 }
 
 impl ObjectNode {
-    fn new(path: &str, connection: &Connection) -> Self {
+    fn new(path: &ObjectPath, connection: &Connection) -> Self {
         let mut node = Self {
-            path: path.to_string(),
+            path: path.to_owned(),
             children: HashMap::new(),
             interfaces: HashMap::new(),
             conn: connection.clone(),
@@ -318,7 +318,7 @@ impl<'a> ObjectServer<'a> {
     pub fn new(connection: &Connection) -> Self {
         Self {
             conn: connection.clone(),
-            root: ObjectNode::new("/", connection),
+            root: ObjectNode::new(&ObjectPath::from_str_unchecked("/"), connection),
             phantom: PhantomData,
         }
     }
@@ -336,7 +336,9 @@ impl<'a> ObjectServer<'a> {
             match node.children.entry(i.into()) {
                 Entry::Vacant(e) => {
                     if create {
-                        node = e.insert(ObjectNode::new(&node_path, &self.conn));
+                        let path = ObjectPath::from_str_unchecked(&node_path);
+
+                        node = e.insert(ObjectNode::new(&path, &self.conn));
                     } else {
                         return None;
                     }
