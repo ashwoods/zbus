@@ -89,8 +89,8 @@ pub fn dbus_proxy(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   block will be expanded to emit the signal from the object path associated with the interface
 ///   instance.
 ///
-///   (TODO: there is no facility yet to emit a signal outside of a dispatched handler - use
-///   the [`Connection::emit_signal()`] manually as a lower-level solution).
+///   **NOTE:** To emit a signal outside of method handler context, you need to use the slightly
+///   lower-level [`ObjectNode::emit_signal`].
 ///
 /// # Example
 ///
@@ -128,7 +128,7 @@ pub fn dbus_proxy(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// See also [`ObjectServer`] documentation to learn how to export an interface over a `Connection`.
 ///
 /// [`ObjectServer`]: https://docs.rs/zbus/1.0.0/zbus/struct.ObjectServer.html
-/// [`Connection::emit_signal()`]: https://docs.rs/zbus/1.0.0/zbus/struct.Connection.html#method.emit_signal
+/// [`ObjectNode::emit_signal`]: https://docs.rs/zbus/1.1.0/zbus/struct.ObjectNode.html#method.emit_signal
 /// [`Interface`]: https://docs.rs/zbus/1.0.0/zbus/trait.Interface.html
 #[proc_macro_attribute]
 pub fn dbus_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
